@@ -1,14 +1,6 @@
 "use client";
 
 // ✅ CREATOR-SNIPE x100 (Solana) — ПРОДАКШН+ (risk checks + partial sell + USDC quick swap)
-// Новое в этой версии:
-//  - Проверка риска токена (RugCheck + локальная эвристика)
-//  - Частичная продажа 25% / 50% / 75% / Max (TOKEN → SOL/USDC)
-//  - Быстрый своп в USDC (переключатель назначения продажи)
-//  - Buy/Sell через Jupiter v6, авто-мониторинг Dexscreener
-//
-// Важно: публичные API могут ограничивать доступ. Если RugCheck недоступен — остаётся эвристика.
-// Это не финсовет.
 
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -300,17 +292,17 @@ function App(): JSX.Element {
     return () => clearInterval(id);
   }, [run]);
 
-  // filters + autoscan
-  const [recentOnlyMins, setRecentOnlyMins] = useState(60);
-  const [minLiq, setMinLiq] = useState(4000);
-  const [minVol, setMinVol] = useState(10000);
-  const [maxFdv, setMaxFdv] = useState(600000);
-  const [minH1, setMinH1] = useState(-5);
-  const [maxH1, setMaxH1] = useState(40);
-  const [autoRows, setAutoRows] = useState<DexPair[]>([]);
-  const [lastScanAt, setLastScanAt] = useState<number | null>(null);
-  const [autoScan, setAutoScan] = useState(true);
-  const [scanSec, setScanSec] = useState(30);
+  // ---------- ФИЛЬТРЫ (ослабленные дефолты, чтобы фид был виден) ----------
+  const [recentOnlyMins, setRecentOnlyMins] = useState(0);        // было 60
+  const [minLiq, setMinLiq]               = useState(0);          // было 4000
+  const [minVol, setMinVol]               = useState(0);          // было 10000
+  const [maxFdv, setMaxFdv]               = useState(2_000_000_000); // было 600000
+  const [minH1, setMinH1]                 = useState(-999);       // было -5
+  const [maxH1, setMaxH1]                 = useState(999);        // было 40
+  const [autoRows, setAutoRows]           = useState<DexPair[]>([]);
+  const [lastScanAt, setLastScanAt]       = useState<number | null>(null);
+  const [autoScan, setAutoScan]           = useState(true);
+  const [scanSec, setScanSec]             = useState(30);
 
   // risk cache: mint -> RiskInfo
   const [risk, setRisk] = useState<Record<string, RiskInfo>>({});
@@ -332,44 +324,51 @@ function App(): JSX.Element {
     }));
   }
 
+  // ---------- УСТОЙЧИВЫЙ СКАН С FALLBACK ----------
   async function scanSolana() {
     try {
-      const res = await fetch(
-        "https://api.dexscreener.com/latest/dex/pairs/solana"
-      );
+      let res = await fetch('https://api.dexscreener.com/latest/dex/pairs/solana');
+
+      // fallback, если основной вызов не ок (CORS/ratelimit)
+      if (!res.ok) {
+        console.warn('Dexscreener pairs failed:', res.status);
+        res = await fetch('https://api.dexscreener.com/latest/dex/search?q=solana');
+      }
+
       if (!res.ok) throw new Error(`Dexscreener HTTP ${res.status}`);
       const data = await res.json();
-      let rows: DexPair[] = data?.pairs || [];
+
+      // Унификация структуры ответа
+      let rows: DexPair[] = Array.isArray(data?.pairs) ? data.pairs
+                        : Array.isArray(data?.results) ? data.results
+                        : [];
+
       const now = Date.now();
       const mins = Math.max(0, Number(recentOnlyMins) || 0);
-      rows = rows.filter(
-        (r) =>
-          mins <= 0 ||
-          !r.pairCreatedAt ||
-          now - r.pairCreatedAt <= mins * 60 * 1000
-      );
-      rows = rows.filter((r) =>
-        typeof r.liquidity?.usd !== "number" ? true : r.liquidity!.usd >= minLiq
-      );
-      rows = rows.filter((r) =>
-        typeof r.volume?.h24 !== "number" ? true : r.volume!.h24 >= minVol
-      );
-      rows = rows.filter((r) =>
-        typeof r.fdv !== "number" ? true : r.fdv! <= maxFdv
-      );
-      rows = rows.filter((r) => {
-        const ch = r.priceChange?.h1;
-        if (typeof ch !== "number") return true;
-        return ch >= minH1 && ch <= maxH1;
-      });
+
+      // Применяем фильтры, но без «удушения» при пустом массиве
+      if (rows.length > 0) {
+        if (mins > 0) rows = rows.filter(r => !r.pairCreatedAt || (now - r.pairCreatedAt) <= mins * 60 * 1000);
+        if (typeof minLiq === 'number') rows = rows.filter(r => (r.liquidity?.usd ?? 0) >= minLiq);
+        if (typeof minVol === 'number') rows = rows.filter(r => (r.volume?.h24 ?? 0) >= minVol);
+        if (typeof maxFdv === 'number') rows = rows.filter(r => (r.fdv ?? 0) <= maxFdv);
+        rows = rows.filter(r => {
+          const ch = r.priceChange?.h1;
+          if (typeof ch !== 'number') return true;
+          return ch >= minH1 && ch <= maxH1;
+        });
+      }
+
       rows = clampSortScore(rows).slice(0, 100);
       setAutoRows(rows);
       setLastScanAt(Date.now());
       rows.slice(0, 10).forEach((r) =>
         ensureRiskForMint(String(r.baseToken?.address), r)
       );
-    } catch {
-      // ignore
+    } catch (e) {
+      console.error('Dexscreener fetch error:', e);
+      setAutoRows([]);
+      setLastScanAt(Date.now());
     }
   }
   useEffect(() => {
@@ -529,25 +528,29 @@ function App(): JSX.Element {
               label="SOL per shot"
               type="number"
               value={String(stakeSol)}
-              onChange={(v) => setStakeSol(Number(v) || 0)}
+              onChange={(v) => setStakeSol(Number((v || "").replace(",", ".")) || 0)}
             />
             <LabeledInput
               label="Slippage bps"
               type="number"
               value={String(slippageBps)}
-              onChange={(v) => setSlippageBps(Math.max(1, Number(v) || 50))}
+              onChange={(v) =>
+                setSlippageBps(Math.max(1, Number((v || "").replace(",", ".")) || 50))
+              }
             />
             <LabeledInput
               label="Автоскан, сек"
               type="number"
               value={String(scanSec)}
-              onChange={(v) => setScanSec(Math.max(5, Number(v) || 30))}
+              onChange={(v) => setScanSec(Math.max(5, Number((v || "").replace(",", ".")) || 30))}
             />
             <LabeledInput
               label="new ≤ мин"
               type="number"
               value={String(recentOnlyMins)}
-              onChange={(v) => setRecentOnlyMins(Number(v) || 0)}
+              onChange={(v) =>
+                setRecentOnlyMins(Number((v || "").replace(",", ".")) || 0)
+              }
             />
             <div className="text-xs flex items-end">
               <button
@@ -561,17 +564,13 @@ function App(): JSX.Element {
               <span className="opacity-70">Sell dest:</span>
               <button
                 onClick={() => setSellDest("SOL")}
-                className={`${pill} ${
-                  sellDest === "SOL" ? "border-emerald-400/50" : ""
-                }`}
+                className={`${pill} ${sellDest === "SOL" ? "border-emerald-400/50" : ""}`}
               >
                 SOL
               </button>
               <button
                 onClick={() => setSellDest("USDC")}
-                className={`${pill} ${
-                  sellDest === "USDC" ? "border-emerald-400/50" : ""
-                }`}
+                className={`${pill} ${sellDest === "USDC" ? "border-emerald-400/50" : ""}`}
               >
                 USDC
               </button>
@@ -772,7 +771,7 @@ function NumberFilter({
       <input
         type="number"
         value={String(value)}
-        onChange={(e) => setValue(Number(e.target.value) || 0)}
+        onChange={(e) => setValue(Number(e.target.value.replace(",", ".")) || 0)}
         className="w-full bg-white/5 border border-white/10 rounded-xl px-2 py-1 outline-none"
       />
     </label>
