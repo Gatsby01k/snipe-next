@@ -1,4 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* фон и шрифты как в канвасе */
 html, body, #__next { height: 100%; }
-body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, Noto Sans, "Apple Color Emoji", "Segoe UI Emoji"; background: #0A0B0F; color: #fff; }
+body {
+  @apply bg-[#0A0B0F] text-white m-0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, Noto Sans, "Apple Color Emoji", "Segoe UI Emoji";
+}
 a { color: inherit; }
 * { box-sizing: border-box; }
